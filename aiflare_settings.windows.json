@@ -1,0 +1,49 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(*git commit*)",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& \\\"$env:CLAUDE_PROJECT_DIR\\.claude\\hooks\\post-tool-use-bash-git-commit.ps1\\\"\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& \\\"$env:CLAUDE_PROJECT_DIR\\.claude\\hooks\\user-prompt-submit.ps1\\\"\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& \\\"$env:CLAUDE_PROJECT_DIR\\.claude\\hooks\\stop.ps1\\\"\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& \\\"$env:CLAUDE_PROJECT_DIR\\.claude\\hooks\\session-end.ps1\\\"\""
+          }
+        ]
+      }
+    ]
+  }
+}
