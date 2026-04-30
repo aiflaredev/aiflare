@@ -112,7 +112,7 @@ That is the **complete** list of paths AIFlare creates or modifies.
 
 The installer does **not** modify your application code, your Git config, your CI configuration, your branch state, or any file outside the paths listed above. It does not push, pull, commit, or open network connections to anything other than:
 
-- `github.com` — to clone the public skill/hook repository (`https://github.com/kwo2002/context-bridge`)
+- `github.com` — to clone the public skill/hook repository (`https://github.com/aiflaredev/aiflare`)
 - `registry.npmjs.org` — to install the MCP server's runtime dependencies
 
 Capture data only leaves your machine **after** install, when you commit (see [Security & Privacy](#security--privacy)).
