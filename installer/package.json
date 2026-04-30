@@ -1,0 +1,12 @@
+{
+  "name": "aiflare-installer-build",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Builds the aiflare.zip bundle and the cross-platform Node.js bootstrapper (install.js) that are served from aiflare.dev.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1"
+  }
+}
