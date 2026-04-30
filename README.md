@@ -24,6 +24,8 @@ With AIFlare, you can:
 
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
+- [What Gets Installed](#what-gets-installed)
+- [What the Installer Does NOT Touch](#what-the-installer-does-not-touch)
 - [How It Works](#how-it-works)
 - [Skills](#skills)
 - [MCP Tools](#mcp-tools)
@@ -39,7 +41,7 @@ With AIFlare, you can:
 
 - Git
 - Node.js 18+
-- macOS, Linux, or Windows
+- macOS, Linux, or Windows (Windows users need [Git for Windows](https://git-scm.com/download/win) — its bundled Git Bash is required for the `pre-push` hook)
 - [Claude Code](https://claude.ai/code) installed and authenticated — **the only supported agent at this time**
 - An AIFlare account and `aiflare.yml` (download from [aiflare.dev](https://aiflare.dev))
 
@@ -52,26 +54,68 @@ With AIFlare, you can:
 # 2) From the project root, run the installer.
 
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/aiflaredev/aiflare/main/install.js -o install.js && node install.js && rm install.js
+curl -fsSL https://aiflare.dev/install.js -o install.cjs && node install.cjs && rm install.cjs
 
 # Windows (PowerShell, with curl.exe — Windows 10 build 1803+)
-curl.exe -fsSL https://raw.githubusercontent.com/aiflaredev/aiflare/main/install.js -o install.js; node install.js; del install.js
+curl.exe -fsSL https://aiflare.dev/install.js -o install.cjs; node install.cjs; del install.cjs
 
 # Windows (PowerShell, with Invoke-WebRequest — works on any PowerShell 3.0+)
-iwr -useb https://raw.githubusercontent.com/aiflaredev/aiflare/main/install.js -OutFile install.js; node install.js; del install.js
+iwr -useb https://aiflare.dev/install.js -OutFile install.cjs; node install.cjs; del install.cjs
 ```
 
 The installer will:
 
 - Install Claude Code skills under `.claude/skills/`
-- Install hook scripts under `.claude/hooks/` (OS-appropriate variants)
-- Install the bundled MCP server under `.claude/mcp-server/` and run `npm install`
+- Install Node.js hook scripts under `.claude/hooks/` (single `.js` family — runs on any OS with Node 18+)
+- Install the bundled MCP server under `.claude/mcp-server/` and run `npm install --production`
 - Merge entries into `.claude/settings.local.json` and `.mcp.json` (existing files are backed up before merge)
-- Install a Git `pre-push` hook
+- Install a Git `pre-push` hook (Bash; on Windows it runs through Git Bash)
 - Append `aiflare.yml`, `.context-capture/`, and `.claude/settings.local.json` to `.gitignore`
 - Add a directive to `CLAUDE.md` instructing the agent to invoke `context-capture` after `git commit`
 
 After installation, just commit normally — capture runs automatically.
+
+## What Gets Installed
+
+A single high-level view of every path the installer creates or modifies in your repository:
+
+```
+your-repo/
+├── .claude/
+│   ├── skills/
+│   │   ├── context-capture/      # automatic — runs after every git commit
+│   │   ├── summarize/            # /summarize
+│   │   ├── daily-digest/         # /daily-digest
+│   │   ├── weekly-digest/        # /weekly-digest
+│   │   ├── pm-digest/            # /pm-digest
+│   │   ├── prompt-evaluate/      # /prompt-evaluate
+│   │   └── session-compare/      # /session-compare
+│   ├── hooks/                    # 5 Node.js hook scripts (.js only)
+│   │   ├── _common.js
+│   │   ├── post-tool-use-bash-git-commit.js
+│   │   ├── post-tool-use-ask-user-question.js
+│   │   ├── user-prompt-submit.js
+│   │   ├── stop.js
+│   │   └── session-end.js
+│   ├── mcp-server/               # bundled @aiflare/mcp-server (npm install --production)
+│   └── settings.local.json       # AIFlare hook entries merged here (backup: .bak)
+├── .mcp.json                     # `aiflare` MCP entry merged here (backup: .bak)
+├── .git/hooks/pre-push           # Bash; non-blocking; only installed if absent
+├── .gitignore                    # +aiflare.yml, +.context-capture/, +.claude/settings.local.json
+├── CLAUDE.md                     # +1 directive line
+└── aiflare.yml                   # your API key (gitignored)
+```
+
+That is the **complete** list of paths AIFlare creates or modifies.
+
+## What the Installer Does NOT Touch
+
+The installer does **not** modify your application code, your Git config, your CI configuration, your branch state, or any file outside the paths listed above. It does not push, pull, commit, or open network connections to anything other than:
+
+- `github.com` — to clone the public skill/hook repository (`https://github.com/kwo2002/context-bridge`)
+- `registry.npmjs.org` — to install the MCP server's runtime dependencies
+
+Capture data only leaves your machine **after** install, when you commit (see [Security & Privacy](#security--privacy)).
 
 ## How It Works
 
@@ -270,9 +314,9 @@ The installer registers five Claude Code hooks via `.claude/settings.local.json`
 | `Stop`                                            | Agent finishes a turn                         | Records turn boundaries (10s timeout)                                   |
 | `SessionEnd`                                      | Claude Code session ends                      | Flushes any pending capture state                                       |
 
-Cross-platform variants (`.sh`, `.ps1`, `.js`) are installed under `.claude/hooks/` — the installer picks the right family for your OS.
+All hook scripts are installed under `.claude/hooks/` as Node.js (`.js`) — a single family that runs on any OS with Node 18+. No shell-specific variants are written to disk.
 
-A Git `pre-push` hook is also installed at `.git/hooks/pre-push`. If a hook is already present, AIFlare skips overwriting and prints the manual-merge command.
+A Git `pre-push` hook is also installed at `.git/hooks/pre-push`. The script is Bash (`#!/usr/bin/env bash`); on Windows it runs through Git Bash (bundled with Git for Windows). If a hook is already present, AIFlare skips overwriting and prints the manual-merge command.
 
 ## Configuration
 
@@ -293,7 +337,7 @@ The installer merges its hook entries into your existing `settings.local.json`. 
 
 ### `.mcp.json`
 
-Same merge-with-backup strategy as above. If you already have an MCP config, only the `aiflare` entry is added.
+Same merge-with-backup strategy as above. If you already have an MCP config, only the `aiflare` entry is added. On merge failure the original is restored and a reference copy is saved to `.claude/mcp.reference.json` for manual merging.
 
 ### `CLAUDE.md`
 
@@ -304,6 +348,8 @@ After git commit, you must always run the context-capture skill.
 ```
 
 This directive ensures the skill runs even on commits performed inside subagents (subagents do not have access to the Skill tool, so the directive is what enforces capture in those cases).
+
+If your `CLAUDE.md` already contains the string `context-capture` (in any form), the installer skips this step to avoid duplication. To re-add the canonical directive after edits, paste the line above manually.
 
 ## Security & Privacy
 
@@ -319,9 +365,10 @@ This directive ensures the skill runs even on commits performed inside subagents
 | `aiflare.yml not found in project root`           | Sign up at [aiflare.dev](https://aiflare.dev), download `aiflare.yml`, place it at the repo root, re-run the installer    |
 | `Not a git repository`                            | Run the installer from inside a Git repo                                                                                  |
 | Capture skill not firing on commit                | Confirm `.claude/settings.local.json` contains the `PostToolUse` Bash entry; re-run the installer to refresh hooks         |
-| `Cannot find module '@modelcontextprotocol/sdk'`  | Run `npm install` inside `.claude/mcp-server`                                                                             |
+| `Cannot find module '@modelcontextprotocol/sdk'`  | Run `npm install --production` inside `.claude/mcp-server`                                                                |
 | Slash commands not visible                        | Restart Claude Code so it re-scans `.claude/skills/`                                                                      |
 | Existing `pre-push` hook                          | The installer does **not** overwrite — manually merge `scripts/githooks/pre-push` into your existing hook                  |
+| `pre-push` hook silently does nothing on Windows  | Confirm Git for Windows is installed and Git Bash is on PATH — the hook is a Bash script                                   |
 
 ## Uninstall
 
