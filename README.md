@@ -139,6 +139,11 @@ When you (or a subagent) run `git commit`, the `PostToolUse` hook matching `Bash
 
 You can later query that data through slash commands or the MCP tools.
 
+For a detailed walkthrough of every phase (hooks, delta extraction, group resolution, push-state transition, etc.), see the capture workflow deep dive:
+
+- [English](./context-capture-workflow-en.md)
+- [한국어](./context-capture-workflow-ko.md)
+
 ## Skills
 
 AIFlare installs a set of Claude Code skills as slash commands. All reports are written in the language of your recent commit messages (English, Korean, etc.) — detected automatically from `git log --oneline -3`.
