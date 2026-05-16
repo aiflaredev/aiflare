@@ -20,6 +20,7 @@ const { execSync } = require('child_process');
 const isWindows = process.platform === 'win32';
 const useColor = process.stdout.isTTY;
 const ZIP_URL = process.env.AIFLARE_ZIP_URL || 'https://aiflare.dev/aiflare.zip';
+const OTEL_DEFAULT_ENDPOINT = 'https://otel.aiflare.dev';
 
 const COLOR = {
   green:  useColor ? '\x1b[32m' : '',
@@ -107,13 +108,20 @@ function hookCommand(scriptName) {
 function buildSettingsJson() {
   return {
     hooks: {
+      // SessionStart exports CLAUDE_SESSION_ID into $CLAUDE_ENV_FILE so capture.js
+      // (and other Bash subprocesses) can resolve the current session deterministically.
+      // Without this, parallel Claude Code sessions on the same project mis-route captures
+      // because capture.js falls back to a "most-recent-mtime of .claude-prompts-*" heuristic.
+      SessionStart: [
+        { hooks: [{ type: 'command', command: hookCommand('session-start.js') }] },
+      ],
       PostToolUse: [
         {
           matcher: 'Bash',
           hooks: [{
             type: 'command',
             command: hookCommand('post-tool-use-bash-git-commit.js'),
-            if: 'Bash(*git commit*)',
+            if: 'Bash(git commit:*)',
           }],
         },
         {
@@ -186,6 +194,51 @@ function ensureGitignoreEntry(gitignorePath, entry) {
   info(`Added ${entry} to .gitignore`);
 }
 
+function parseAiflareYml(text) {
+  // NOTE: simple parser for aiflare.yml (api_key, endpoint, otel_endpoint).
+  // Comment-strip happens before quote handling, so '#' inside quoted values
+  // would be corrupted. None of our 3 known fields can contain '#', so this
+  // is acceptable. If new fields with '#' are added, replace this parser.
+  const result = {};
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.replace(/#.*$/, '').trim();
+    if (!line) continue;
+    // bare YAML key: letter/underscore start, then alphanumeric/underscore
+    const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$/);
+    if (!m) continue;
+    let value = m[2].trim();
+    if ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    result[m[1]] = value;
+  }
+  return result;
+}
+
+function buildOtelEnv({ api_key, otel_endpoint }) {
+  const endpoint = otel_endpoint || OTEL_DEFAULT_ENDPOINT;
+  return {
+    CLAUDE_CODE_ENABLE_TELEMETRY: '1',
+    OTEL_METRICS_EXPORTER: 'otlp',
+    OTEL_LOGS_EXPORTER: 'otlp',
+    OTEL_EXPORTER_OTLP_PROTOCOL: 'http/protobuf',
+    OTEL_EXPORTER_OTLP_ENDPOINT: endpoint,
+    OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${api_key}`,
+    OTEL_METRICS_INCLUDE_SESSION_ID: 'false',
+    OTEL_METRICS_INCLUDE_ACCOUNT_UUID: 'false',
+    OTEL_METRICS_INCLUDE_VERSION: 'true',
+  };
+}
+
+function mergeOtelEnv(dst, otelEnv) {
+  if (!dst.env || typeof dst.env !== 'object') dst.env = {};
+  for (const [k, v] of Object.entries(otelEnv)) {
+    dst.env[k] = v;
+  }
+  return dst;
+}
+
 async function main() {
   for (const cmd of ['git', 'node']) {
     if (!commandExists(cmd)) {
@@ -224,6 +277,25 @@ async function main() {
     console.log('');
     process.exit(1);
   }
+
+  let aiflareConfig;
+  try {
+    aiflareConfig = parseAiflareYml(fs.readFileSync(ymlPath, 'utf8'));
+  } catch (e) {
+    errlog(`Failed to read aiflare.yml: ${e.message}`);
+    process.exit(1);
+  }
+  if (!aiflareConfig.api_key) {
+    errlog('aiflare.yml is missing required field: api_key');
+    console.log('');
+    console.log('  To fix: re-download aiflare.yml from https://aiflare.dev');
+    console.log('');
+    process.exit(1);
+  }
+  const otelEnv = buildOtelEnv({
+    api_key: aiflareConfig.api_key,
+    otel_endpoint: aiflareConfig.otel_endpoint,
+  });
 
   console.log('');
   console.log('Starting AIFlare installation...');
@@ -309,21 +381,24 @@ async function main() {
     fs.mkdirSync('.claude', { recursive: true });
     const settingsContent = buildSettingsJson();
     if (!fs.existsSync(settingsFile)) {
+      mergeOtelEnv(settingsContent, otelEnv);
       fs.writeFileSync(settingsFile, JSON.stringify(settingsContent, null, 2) + '\n');
-      info(`Hooks config created -> ${settingsFile}`);
+      info(`Hooks + OTel env config created -> ${settingsFile}`);
     } else {
       const backup = `${settingsFile}.bak`;
       fs.copyFileSync(settingsFile, backup);
       try {
         const existing = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
         const merged = mergeHooks(existing, settingsContent);
+        mergeOtelEnv(merged, otelEnv);
         fs.writeFileSync(settingsFile, JSON.stringify(merged, null, 2) + '\n');
-        info(`Hooks merged -> ${settingsFile} (backup: ${backup})`);
+        info(`Hooks + OTel env merged -> ${settingsFile} (backup: ${backup})`);
       } catch (e) {
         fs.copyFileSync(backup, settingsFile);
-        warn(`Hook merge failed: ${e.message}. Original ${settingsFile} restored.`);
+        warn(`Settings merge failed: ${e.message}. Original ${settingsFile} restored.`);
+        const referenceContent = mergeOtelEnv({ ...settingsContent }, otelEnv);
         const ref = path.join('.claude', 'aiflare_settings.reference.json');
-        fs.writeFileSync(ref, JSON.stringify(settingsContent, null, 2) + '\n');
+        fs.writeFileSync(ref, JSON.stringify(referenceContent, null, 2) + '\n');
         console.log(`  Reference saved to ${ref} for manual merge.`);
       }
     }
@@ -447,7 +522,15 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  errlog(err.stack || err.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    errlog(err.stack || err.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  parseAiflareYml,
+  buildOtelEnv,
+  mergeOtelEnv,
+};

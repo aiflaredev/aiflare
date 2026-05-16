@@ -2,15 +2,20 @@ import type { ApiClient, DailyDigestData } from "../api-client.js";
 
 export async function handleGetDailyDigest(
   apiClient: ApiClient,
-  args: { date: string }
+  args: { date: string; audience?: "DEV" | "PM" }
 ): Promise<string> {
   const data = await apiClient.getDailyDigest(args.date);
-  return formatDailyDigest(data);
+  const audience = args.audience ?? "DEV";
+  return formatDailyDigest(data, audience);
 }
 
-function formatDailyDigest(data: DailyDigestData): string {
+function formatDailyDigest(data: DailyDigestData, audience: "DEV" | "PM"): string {
   const lines: string[] = [];
-  lines.push(`## Daily Digest: ${data.date}`);
+  if (audience === "PM") {
+    lines.push(`## PM Daily Digest Data: ${data.date}`);
+  } else {
+    lines.push(`## Daily Digest: ${data.date}`);
+  }
   lines.push(`- **Total commits:** ${data.summary.totalCommits}`);
   lines.push(`- **Total sessions:** ${data.summary.totalSessions}`);
   lines.push(`- **Total changed files:** ${data.summary.totalChangedFiles}`);

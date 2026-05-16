@@ -10,6 +10,7 @@ import { loadConfig } from "./config.js";
 import { ApiClient } from "./api-client.js";
 import { handleGetSessionSummary } from "./tools/get-session-summary.js";
 import { handleSaveSessionReport } from "./tools/save-session-report.js";
+import { handleGetSavedSessionReport } from "./tools/get-saved-session-report.js";
 import { handleGetDailyDigest } from "./tools/get-daily-digest.js";
 import { handleSaveDailyDigestReport } from "./tools/save-daily-digest-report.js";
 import { handleGetSessionCompare } from "./tools/get-session-compare.js";
@@ -18,14 +19,13 @@ import { handleGetWeeklyDigest } from "./tools/get-weekly-digest.js";
 import { handleSaveWeeklyDigestReport } from "./tools/save-weekly-digest-report.js";
 import { handleGetSessionPrompts } from "./tools/get-session-prompts.js";
 import { handleSavePromptEvaluationReport } from "./tools/save-prompt-evaluation-report.js";
-import { handleGetPmDigest } from "./tools/get-pm-digest.js";
-import { handleSavePmDigestReport } from "./tools/save-pm-digest-report.js";
+import { handleWhy } from "./tools/why.js";
 
 const config = loadConfig();
 
 /**
- * 세션 ID를 결정한다.
- * 우선순위: 인자 → CLAUDE_SESSION_ID 환경변수 → .context-capture/.claude-prompts-* 파일 중 최신
+ * Resolves the session ID.
+ * Priority: argument → CLAUDE_SESSION_ID environment variable → most recent .context-capture/.claude-prompts-* file
  */
 function resolveSessionId(explicit?: string): string | undefined {
   if (explicit) return explicit;
@@ -43,7 +43,7 @@ function resolveSessionId(explicit?: string): string | undefined {
       return basename(files[0].name).slice(prefix.length);
     }
   } catch {
-    // .context-capture 디렉터리가 없거나 git 저장소가 아닌 경우 무시
+    // Ignore when .context-capture directory is missing or not a git repository
   }
   return undefined;
 }
@@ -68,7 +68,7 @@ server.tool(
     const resolved = resolveSessionId(sessionId);
     if (!resolved) {
       return {
-        content: [{ type: "text" as const, text: "세션 ID가 필요합니다. sessionId를 지정하거나 Claude Code 세션 내에서 실행해주세요." }],
+        content: [{ type: "text" as const, text: "Session ID is required. Specify sessionId or run inside a Claude Code session." }],
       };
     }
     const apiClient = new ApiClient(config);
@@ -98,7 +98,7 @@ server.tool(
     const resolved = resolveSessionId(sessionId);
     if (!resolved) {
       return {
-        content: [{ type: "text" as const, text: "세션 ID가 필요합니다. sessionId를 지정하거나 Claude Code 세션 내에서 실행해주세요." }],
+        content: [{ type: "text" as const, text: "Session ID is required. Specify sessionId or run inside a Claude Code session." }],
       };
     }
     const apiClient = new ApiClient(config);
@@ -106,7 +106,41 @@ server.tool(
       const text = await handleSaveSessionReport(apiClient, { sessionId: resolved, title, content });
       return { content: [{ type: "text" as const, text }] };
     } catch (e) {
-      return { content: [{ type: "text" as const, text: `보고서 저장에 실패했습니다. 보고서 내용은 위에 출력되어 있으니 참고해주세요.\n\n오류: ${e instanceof Error ? e.message : String(e)}` }] };
+      return { content: [{ type: "text" as const, text: `Failed to save report. The report content is printed above for reference.\n\nError: ${e instanceof Error ? e.message : String(e)}` }] };
+    }
+  }
+);
+
+server.tool(
+  "get_saved_session_report",
+  "Retrieve the latest saved Markdown report for a past Claude Code session. Use this to inject the previous session's intent/decisions/alternatives into the current session's context. The sessionId must be the session you want to recall (copy from the AIFlare web dashboard); it is NOT the current session.",
+  {
+    sessionId: z.string().describe("The past Claude session ID to recall. Required. Copy from the web dashboard."),
+  },
+  async ({ sessionId }) => {
+    if (!config) {
+      return {
+        content: [{ type: "text" as const, text: "AIFlare is not configured. Place aiflare.yml in your project root." }],
+      };
+    }
+    if (!sessionId || sessionId.trim() === "") {
+      return {
+        content: [{ type: "text" as const, text: "sessionId is required. Call as /context-inject <sessionId>. Copy the session ID from the web dashboard." }],
+      };
+    }
+    const apiClient = new ApiClient(config);
+    try {
+      const text = await handleGetSavedSessionReport(apiClient, { sessionId });
+      return { content: [{ type: "text" as const, text }] };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      // Map SESSION_REPORT_NOT_FOUND to user-friendly /summarize guidance.
+      if (message.includes("Session report not found")) {
+        return {
+          content: [{ type: "text" as const, text: "No saved report exists for this session. Run /summarize in that session first to create a report." }],
+        };
+      }
+      return { content: [{ type: "text" as const, text: `Error querying AIFlare: ${message}` }] };
     }
   }
 );
@@ -116,8 +150,9 @@ server.tool(
   "Retrieve a daily digest for a specific date. Returns total commits, sessions, changed files, tag breakdown, and the most frequently changed files.",
   {
     date: z.string().describe("Date in YYYY-MM-DD format (e.g., '2026-04-09')"),
+    audience: z.enum(["DEV", "PM"]).optional().describe("Report audience. DEV (default): developer tone. PM: business tone. Affects header text only."),
   },
-  async ({ date }) => {
+  async ({ date, audience }) => {
     if (!config) {
       return {
         content: [{ type: "text" as const, text: "AIFlare is not configured. Place aiflare.yml in your project root." }],
@@ -125,7 +160,7 @@ server.tool(
     }
     const apiClient = new ApiClient(config);
     try {
-      const text = await handleGetDailyDigest(apiClient, { date });
+      const text = await handleGetDailyDigest(apiClient, { date, audience });
       return { content: [{ type: "text" as const, text }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: `Error querying AIFlare: ${e instanceof Error ? e.message : String(e)}` }] };
@@ -140,8 +175,9 @@ server.tool(
     date: z.string().describe("Date the report covers in YYYY-MM-DD format"),
     title: z.string().describe("Report title"),
     content: z.string().describe("Report content in Markdown format"),
+    audience: z.enum(["DEV", "PM"]).optional().describe("Report audience. DEV (default): developer-facing. PM: business-facing."),
   },
-  async ({ date, title, content }) => {
+  async ({ date, title, content, audience }) => {
     if (!config) {
       return {
         content: [{ type: "text" as const, text: "AIFlare is not configured. Place aiflare.yml in your project root." }],
@@ -149,10 +185,10 @@ server.tool(
     }
     const apiClient = new ApiClient(config);
     try {
-      const text = await handleSaveDailyDigestReport(apiClient, { date, title, content });
+      const text = await handleSaveDailyDigestReport(apiClient, { date, title, content, audience });
       return { content: [{ type: "text" as const, text }] };
     } catch (e) {
-      return { content: [{ type: "text" as const, text: `보고서 저장에 실패했습니다. 보고서 내용은 위에 출력되어 있으니 참고해주세요.\n\n오류: ${e instanceof Error ? e.message : String(e)}` }] };
+      return { content: [{ type: "text" as const, text: `Failed to save report. The report content is printed above for reference.\n\nError: ${e instanceof Error ? e.message : String(e)}` }] };
     }
   }
 );
@@ -173,7 +209,7 @@ server.tool(
     const resolvedSessionId1 = resolveSessionId(sessionId1);
     if (!resolvedSessionId1) {
       return {
-        content: [{ type: "text" as const, text: "세션 ID가 필요합니다. sessionId1을 지정하거나 Claude Code 세션 내에서 실행해주세요." }],
+        content: [{ type: "text" as const, text: "Session ID is required. Specify sessionId1 or run inside a Claude Code session." }],
       };
     }
     const apiClient = new ApiClient(config);
@@ -206,7 +242,7 @@ server.tool(
       const text = await handleSaveSessionCompareReport(apiClient, { sessionId1, sessionId2, title, content });
       return { content: [{ type: "text" as const, text }] };
     } catch (e) {
-      return { content: [{ type: "text" as const, text: `보고서 저장에 실패했습니다. 보고서 내용은 위에 출력되어 있으니 참고해주세요.\n\n오류: ${e instanceof Error ? e.message : String(e)}` }] };
+      return { content: [{ type: "text" as const, text: `Failed to save report. The report content is printed above for reference.\n\nError: ${e instanceof Error ? e.message : String(e)}` }] };
     }
   }
 );
@@ -222,11 +258,12 @@ function getCurrentWeek(): string {
 
 server.tool(
   "get_weekly_digest",
-  "Retrieve a weekly digest. Returns stats, per-member work summaries, key decisions (with intent and rejected alternatives), and most changed files for the specified week.",
+  "Retrieve a weekly digest. Returns stats, per-member work summaries, key decisions, and most changed files for the specified week. Use audience='PM' to get the same data formatted for a non-technical, business-facing report.",
   {
     week: z.string().describe("ISO 8601 week (e.g., '2026-W15'). If omitted, uses the current week.").optional(),
+    audience: z.enum(["DEV", "PM"]).optional().describe("Report audience. DEV (default): developer tone. PM: business tone. Affects header text and formatting."),
   },
-  async ({ week }) => {
+  async ({ week, audience }) => {
     if (!config) {
       return {
         content: [{ type: "text" as const, text: "AIFlare is not configured. Place aiflare.yml in your project root." }],
@@ -235,7 +272,7 @@ server.tool(
     const resolvedWeek = week || getCurrentWeek();
     const apiClient = new ApiClient(config);
     try {
-      const text = await handleGetWeeklyDigest(apiClient, { week: resolvedWeek });
+      const text = await handleGetWeeklyDigest(apiClient, { week: resolvedWeek, audience });
       return { content: [{ type: "text" as const, text }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: `Error querying AIFlare: ${e instanceof Error ? e.message : String(e)}` }] };
@@ -245,13 +282,14 @@ server.tool(
 
 server.tool(
   "save_weekly_digest_report",
-  "Save a weekly digest report to the AIFlare server. The report will be viewable on the web dashboard.",
+  "Save a weekly digest report to the AIFlare server. Use audience='PM' for PM-oriented reports, audience='DEV' (or omit) for developer-facing reports. The report will be viewable on the web dashboard with audience filtering.",
   {
     week: z.string().describe("ISO 8601 week the report covers (e.g., '2026-W15')"),
     title: z.string().describe("Report title"),
     content: z.string().describe("Report content in Markdown format"),
+    audience: z.enum(["DEV", "PM"]).optional().describe("Report audience. DEV (default): developer-facing. PM: business-facing."),
   },
-  async ({ week, title, content }) => {
+  async ({ week, title, content, audience }) => {
     if (!config) {
       return {
         content: [{ type: "text" as const, text: "AIFlare is not configured. Place aiflare.yml in your project root." }],
@@ -259,57 +297,10 @@ server.tool(
     }
     const apiClient = new ApiClient(config);
     try {
-      const text = await handleSaveWeeklyDigestReport(apiClient, { week, title, content });
+      const text = await handleSaveWeeklyDigestReport(apiClient, { week, title, content, audience });
       return { content: [{ type: "text" as const, text }] };
     } catch (e) {
-      return { content: [{ type: "text" as const, text: `보고서 저장에 실패했습니다. 보고서 내용은 위에 출력되어 있으니 참고해주세요.\n\n오류: ${e instanceof Error ? e.message : String(e)}` }] };
-    }
-  }
-);
-
-server.tool(
-  "get_pm_digest",
-  "Retrieve the same weekly digest data as get_weekly_digest, but presented as raw input for a PM-oriented report. Same backend endpoint; the difference is the downstream skill rewrites the data in non-technical, business-facing vocabulary.",
-  {
-    week: z.string().describe("ISO 8601 week (e.g., '2026-W15'). If omitted, uses the current week.").optional(),
-  },
-  async ({ week }) => {
-    if (!config) {
-      return {
-        content: [{ type: "text" as const, text: "AIFlare is not configured. Place aiflare.yml in your project root." }],
-      };
-    }
-    const resolvedWeek = week || getCurrentWeek();
-    const apiClient = new ApiClient(config);
-    try {
-      const text = await handleGetPmDigest(apiClient, { week: resolvedWeek });
-      return { content: [{ type: "text" as const, text }] };
-    } catch (e) {
-      return { content: [{ type: "text" as const, text: `Error querying AIFlare: ${e instanceof Error ? e.message : String(e)}` }] };
-    }
-  }
-);
-
-server.tool(
-  "save_pm_digest_report",
-  "Save a PM-oriented weekly digest report to the AIFlare server. The report will be viewable on the web dashboard, in a section separate from team weekly digests.",
-  {
-    week: z.string().describe("ISO 8601 week the report covers (e.g., '2026-W15')"),
-    title: z.string().describe("Report title"),
-    content: z.string().describe("Report content in Markdown format"),
-  },
-  async ({ week, title, content }) => {
-    if (!config) {
-      return {
-        content: [{ type: "text" as const, text: "AIFlare is not configured. Place aiflare.yml in your project root." }],
-      };
-    }
-    const apiClient = new ApiClient(config);
-    try {
-      const text = await handleSavePmDigestReport(apiClient, { week, title, content });
-      return { content: [{ type: "text" as const, text }] };
-    } catch (e) {
-      return { content: [{ type: "text" as const, text: `보고서 저장에 실패했습니다. 보고서 내용은 위에 출력되어 있으니 참고해주세요.\n\n오류: ${e instanceof Error ? e.message : String(e)}` }] };
+      return { content: [{ type: "text" as const, text: `Failed to save report. The report content is printed above for reference.\n\nError: ${e instanceof Error ? e.message : String(e)}` }] };
     }
   }
 );
@@ -329,7 +320,7 @@ server.tool(
     const resolved = resolveSessionId(sessionId);
     if (!resolved) {
       return {
-        content: [{ type: "text" as const, text: "세션 ID가 필요합니다. sessionId를 지정하거나 Claude Code 세션 내에서 실행해주세요." }],
+        content: [{ type: "text" as const, text: "Session ID is required. Specify sessionId or run inside a Claude Code session." }],
       };
     }
     const apiClient = new ApiClient(config);
@@ -359,7 +350,7 @@ server.tool(
     const resolved = resolveSessionId(sessionId);
     if (!resolved) {
       return {
-        content: [{ type: "text" as const, text: "세션 ID가 필요합니다. sessionId를 지정하거나 Claude Code 세션 내에서 실행해주세요." }],
+        content: [{ type: "text" as const, text: "Session ID is required. Specify sessionId or run inside a Claude Code session." }],
       };
     }
     const apiClient = new ApiClient(config);
@@ -367,7 +358,30 @@ server.tool(
       const text = await handleSavePromptEvaluationReport(apiClient, { sessionId: resolved, title, content });
       return { content: [{ type: "text" as const, text }] };
     } catch (e) {
-      return { content: [{ type: "text" as const, text: `보고서 저장에 실패했습니다. 보고서 내용은 위에 출력되어 있으니 참고해주세요.\n\n오류: ${e instanceof Error ? e.message : String(e)}` }] };
+      return { content: [{ type: "text" as const, text: `Failed to save report. The report content is printed above for reference.\n\nError: ${e instanceof Error ? e.message : String(e)}` }] };
+    }
+  }
+);
+
+server.tool(
+  "why",
+  "Explain why a line of code (or file) was written the way it is. Runs git log -L locally to find the commits that touched the line, then retrieves each commit's AI agent intent, alternatives, line-around diff, and conversation from AIFlare as a timeline. Use this when debugging agent-written code instead of guessing at the original design.",
+  {
+    file: z.string().describe("File path, relative to the git root or absolute"),
+    line: z.number().int().positive().optional().describe("Line number to explain. If omitted, returns the timeline for the entire file (up to 5 most recent commits)."),
+  },
+  async ({ file, line }) => {
+    if (!config) {
+      return {
+        content: [{ type: "text" as const, text: "AIFlare is not configured. Place aiflare.yml in your project root." }],
+      };
+    }
+    const apiClient = new ApiClient(config);
+    try {
+      const text = await handleWhy(apiClient, { file, line });
+      return { content: [{ type: "text" as const, text }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: `Error querying AIFlare: ${e instanceof Error ? e.message : String(e)}` }] };
     }
   }
 );

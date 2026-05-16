@@ -4,9 +4,9 @@ AIFlare combines two Claude Code mechanisms — **Hooks** and **Skills** — to 
 
 > **Hook system — external script invocation pattern**
 >
-> Five command hooks (`UserPromptSubmit`, `Stop`, `PostToolUse(Bash, if "Bash(git commit:*)")`, `PostToolUse(AskUserQuestion)`, `SessionEnd`) are registered in `settings.local.json`. Each one delegates to its own Node.js script under `.claude/hooks/{hook}.js`. Shared behavior lives in the `_common.js` module, and `install.js` installs the same `.js` hook set on every OS (macOS / Linux / Windows). The phase-by-phase flow descriptions below describe what happens *inside* those external hook scripts.
+> Six command hooks (`SessionStart`, `UserPromptSubmit`, `Stop`, `PostToolUse(Bash, if "Bash(git commit:*)")`, `PostToolUse(AskUserQuestion)`, `SessionEnd`) are registered in `settings.local.json`. Each one delegates to its own Node.js script under `.claude/hooks/{hook}.js`. Shared behavior lives in the `_common.js` module, and `install.js` installs the same `.js` hook set on every OS (macOS / Linux / Windows). The phase-by-phase flow descriptions below describe what happens *inside* those external hook scripts.
 >
-> `SessionEnd` only performs cleanup (no API call).
+> `SessionStart` and `SessionEnd` do not make API calls — `SessionStart` only exports `CLAUDE_SESSION_ID` into `$CLAUDE_ENV_FILE`, and `SessionEnd` only cleans up.
 
 ---
 
@@ -18,6 +18,13 @@ User input
     ▼
 ┌──────────────────────────────────────────────────────────┐
 │  Claude Code Session                                     │
+│                                                          │
+│  ⓪ SessionStart Hook (on session start / resume)         │
+│     → Export CLAUDE_SESSION_ID=<session_id> into         │
+│       $CLAUDE_ENV_FILE so every Bash subprocess in this  │
+│       session (capture.js included) can deterministically │
+│       resolve the current session — required for correct  │
+│       routing under parallel Claude Code sessions         │
 │                                                          │
 │  ① UserPromptSubmit Hook                                 │
 │     → Append the user prompt as JSONL to a local file    │
@@ -354,10 +361,17 @@ capture.js runs
     │
     ├─ Read api_key, endpoint from aiflare.yml
     │
-    ├─ claudeSessionId fallback
-    │   When --claude-session-id is omitted:
-    │   extract the session ID from the most recent
-    │   .claude-prompts-* file
+    ├─ claudeSessionId fallback (resolution order)
+    │   1. --claude-session-id argument (preferred — passed
+    │      by the skill template using $CLAUDE_SESSION_ID)
+    │   2. $CLAUDE_SESSION_ID env var (exported by the
+    │      SessionStart hook into $CLAUDE_ENV_FILE; reliable
+    │      under parallel sessions because env vars are
+    │      bound to the session's process tree)
+    │   3. Most recent .claude-prompts-* file by mtime
+    │      (legacy heuristic — only correct for single-
+    │      session installs; kept for backward compatibility
+    │      with installs that pre-date the SessionStart hook)
     │
     ├─ conversationSnippet fallback (auto-read delta file)
     │   When --conversation-snippet is omitted:
@@ -579,10 +593,11 @@ endpoint: "localhost:8080"
 
 Each command hook's `command` field is a single-line invocation of the corresponding Node.js script under `.claude/hooks/{name}.js`. All behavior lives in those external scripts.
 
-`install.js` merges in these five hooks:
+`install.js` merges in these six hooks:
 
 | Hook | Event | External script | Role |
 |------|-------|-----------------|------|
+| `SessionStart` | When a session starts or resumes | `session-start.js` | Export `CLAUDE_SESSION_ID=<session_id>` into `$CLAUDE_ENV_FILE` so subsequent Bash subprocesses (notably `capture.js`) can resolve the current session deterministically — required for correct routing under parallel Claude Code sessions |
 | `UserPromptSubmit` | When a prompt is submitted | `user-prompt-submit.js` | Append the user input as JSONL to a local file |
 | `Stop` | When the AI response finishes | `stop.js` | Append the AI response (`last_assistant_message`) as JSONL to the same file |
 | `PostToolUse` | `Bash` matcher + `if: "Bash(git commit:*)"` | `post-tool-use-bash-git-commit.js` | Send conversation JSONL + extract line-count delta + force Skill invocation (with the hook's internal regex double-check) |
@@ -596,6 +611,7 @@ A single Node.js implementation. On install they are copied into `.claude/hooks/
 | File | Role |
 |------|------|
 | `_common.js` | Shared library (camelCase). `readInput`, `getGitRoot`, `ensureContextDir`, `promptFilePath`, `offsetFilePath`, `deltaFilePath`, `pendingQuestionPath`, `hasAiflareConfig`, `readAiflareConfig`, `hasContextCaptureSkill`, `makeLogger` (info/warn/error emit factory) — 11 in total |
+| `session-start.js` | On session start/resume, append `export CLAUDE_SESSION_ID='<session_id>'` to `$CLAUDE_ENV_FILE` so all Bash subprocesses in this session inherit the correct session id (the capture.js routing depends on this) |
 | `user-prompt-submit.js` | User prompt → append one JSONL line |
 | `stop.js` | `last_assistant_message` → append one JSONL line (skip if `stop_hook_active=true`) |
 | `post-tool-use-bash-git-commit.js` | Right after a git commit. Defense-in-depth regex check → `uploadPromptFile` → `updateDelta` → emit the Skill-enforcement message |

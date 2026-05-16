@@ -49,6 +49,11 @@ function updateDelta(sessionId, gitRoot) {
 (async () => {
   const inp = await c.readInput();
   if (!inp) return;
+  // Defense-in-depth: even in environments where the `if` filter in settings.local.json is ignored
+  // (Claude Code below v2.1.85, or fallback firing due to unparseable compound commands),
+  // exit immediately if the command is not a git commit.
+  const cmd = inp.input?.tool_input?.command ?? inp.input?.command ?? '';
+  if (!/(?:^|[\s;&|])git\s+commit(?:\s|$|;|&|\|)/.test(cmd)) return;
   const log = c.makeLogger(HOOK_NAME, inp.sessionId);
   const gitRoot = c.getGitRoot();
   if (!gitRoot) return;

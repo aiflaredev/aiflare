@@ -157,53 +157,129 @@ The existing Fixed Retry approach caused simultaneous retries to pile up during 
 
 #### alternatives (optional)
 
-Alternatives that were considered but not chosen. Separate each alternative with a bold title + bullets for approach/rejection reason.
+**The default value is an empty string.** Fill this field only when **both** of the following conditions are met.
 
-**Structure template:**
+1. An **explicit discussion of alternatives** exists in the conversation context
+   — not "remarks on a similar topic", but **concrete comparison** statements like "Y instead of X", "X or Y", "I considered X".
+2. The rejected alternative and the rejection reason can be **directly extracted from the conversation**
+   — not supplemented by model inference.
+
+If either condition is not met, send an empty string.
+Writing a "plausibly inferable alternative" is hallucination and is strictly forbidden.
+A single hallucinated line destroys the credibility of the entire alternatives field.
+
+---
+
+**Pre-write detection step (mandatory, no bypass)**
+
+Before starting to write, find one or more of the following signals in the conversation context.
+
+| Signal type | Korean example | English example |
+|---|---|---|
+| Explicit comparison | "A 대신 B", "A냐 B냐" | "instead of A", "A vs B" |
+| Explicit review and rejection | "A도 봤는데 X 때문에 안 함" | "considered A but" |
+| Decision branching | "옵션 1·2 중 골라야 함" | "option 1 or option 2" |
+| User's explicit refusal | "A 말고 B로 해줘" | "not A, use B" |
+
+**If a signal is found**: include a one-line verbatim quote from the conversation segment containing the signal at the top of the alternatives body.
+**If no signal is found**: `alternatives = ""` (empty string). Entering the write phase without passing the detection step is forbidden.
+
+⚠️ "Similar conversation topic" ≠ "alternative discussion".
+Example: If the user only said "Add a Redis cache", other caches (Caffeine, Memcached, etc.) are not alternatives (not discussed).
+
+---
+
+**Write format**
+
+When a signal is found and you fill the field, place the verbatim quote at the top and the structured alternative block below it.
 
 ```
-**Alternative 1 — [Name]**
-- Approach: [What was considered]
-- Rejected because: [Why it was not chosen]
+> Conversation quote: "[one-line excerpt]"
 
-**Alternative 2 — [Name]**
-- Approach: [What was considered]
-- Rejected because: [Why it was not chosen]
+**Alternative — [Name]**
+- Approach: [what was considered]
+- Rejected because: [rejection reason, grounded in the conversation]
 ```
 
-**An empty string ("no alternatives") is only permitted when:**
-- The requirements are clear enough that there is practically only one implementation approach (e.g., typo fix, config value change)
-- No alternatives were discussed during the conversation, and no reasonable alternatives come to mind
+Repeat the block for each additional alternative.
 
-Before writing, review the conversation context and verify whether any approaches were discussed.
+---
 
-**Good example:**
+**Example 1 — Empty string (most common case)**
+
+Conversation context: "Add a RememberMe option to the login API" → implementation → tests → commit
+
+Detection result: No alternative signal.
+
+`alternatives = ""`
+
+Explanation: The requirement was clear, the implementation path was singular, and no alternatives were compared in the conversation. An empty string is the correct answer.
+
+---
+
+**Example 2 — Empty string (similar topic but no explicit comparison)**
+
+Conversation context: User says "Let's add a cache, with Redis" → model implements with Redis.
+
+Detection result: No explicit comparison with other caches (Caffeine, Memcached, etc.).
+The mere appearance of the topic "cache" is not a detection signal.
+
+`alternatives = ""`
+
+Explanation: Writing "Chose Redis over Caffeine because of the distributed environment" here would be hallucination.
+The user never mentioned Caffeine, nor rejected it.
+
+---
+
+**Example 3 — Empty string (the model has alternatives in mind, but none in the conversation)**
+
+Conversation context: "Fix this N+1 query" → model resolves it with fetch join.
+
+Detection result: Other N+1 solutions like EntityGraph and @BatchSize exist in the model's knowledge,
+but none of them were compared or discussed in the conversation with the user.
+
+`alternatives = ""`
+
+Explanation: The model may feel an urge to write "There were other methods, but fetch join was chosen."
+That would be **inventing a conversation the user never saw.** An empty string is the correct answer.
+
+---
+
+**Example 4 — Filled case (rare, but a clear signal exists)**
+
+Conversation context: User says "Improve the payment retry logic. Torn between Exponential Backoff vs Circuit Breaker."
+→ Model compares the two.
+→ User says "Let's go with Backoff. Circuit Breaker is overkill for our scale."
+
+Detection result:
+- Explicit comparison ✅ ("Backoff vs Circuit Breaker")
+- Explicit rejection reason ✅ ("overkill for our scale")
+- Quotable ✅
+
+`alternatives`:
 
 ```
-**Alternative 1 — Increase Fixed Retry interval (3s→10s)**
-- Approach: Keep existing logic but increase interval to reduce load
-- Rejected because: Simultaneous requests could still pile up depending on traffic patterns.
-  Only a temporary mitigation, not a fundamental solution.
+> Conversation quote: "Circuit Breaker is overkill for our scale"
 
-**Alternative 2 — Introduce Circuit Breaker pattern**
-- Approach: Block requests entirely when failure rate exceeds threshold
-- Rejected because: Excessive complexity for the current service scale.
-  Backoff alone was deemed sufficiently effective.
+**Alternative — Circuit Breaker pattern**
+- Approach: Block all requests when failure rate exceeds a threshold
+- Rejected because: Overkill for the current service scale (user's judgment)
 ```
 
-**Bad example:**
+---
 
-```
-There were other approaches but this one was the best.
-```
+**Post-write verification (mandatory)**
 
-(No alternative names, no rejection reasons, no structure)
+If you filled alternatives, verify the following before sending.
 
-**Checklist:**
-- Have you reviewed all approaches discussed during the conversation?
-- Does each alternative have a name?
-- Are rejection reasons specific? (Not just "too complex" — give concrete reasons)
-- Are alternatives separated by line breaks?
+- [ ] Is each alternative grounded in a **specific utterance** in the conversation? (Not the model's general knowledge.)
+- [ ] Is the rejection reason **directly derived from the conversation**? (Not your inference.)
+- [ ] Did you include a one-line verbatim quote at the top of the body?
+
+⚠️ (For items that passed the detection step) if your confidence is **below 90%**, delete that alternative.
+⚠️ If all alternatives are subject to deletion → send a total empty string.
+
+Principle: A hallucinated line < an empty string. The former is more harmful to credibility.
 
 ---
 
@@ -251,7 +327,7 @@ PaymentRetryService.kt: Changed retry logic. application.yml: Added settings. Pa
 Pass the data generated in step 3 as arguments to the capture script.
 The script handles config file reading, JSON generation, API calls, and result processing.
 
-> `continuation` 필드는 capture.js 가 자동으로 세팅한다. 직전에 `AskUserQuestion` tool 이 실행되었다면 `.context-capture/.pending-question-{SESSION_ID}` 플래그 파일이 존재하고, capture.js 가 이를 감지해 `continuation: true` 를 전송한다. 사용자나 에이전트가 직접 넘길 필요는 없다.
+> The `continuation` field is set automatically by capture.js. If the `AskUserQuestion` tool was executed immediately before, a flag file `.context-capture/.pending-question-{SESSION_ID}` exists, and capture.js detects it and sends `continuation: true`. The user or agent does not need to pass it manually.
 
 Run the capture script (Node.js, cross-platform — requires Node 18+):
 
@@ -260,12 +336,15 @@ node .claude/skills/context-capture/scripts/capture.js \
   --title "title here" \
   --intent "intent here" \
   --commit-hash "commitHash here" \
+  --claude-session-id "$CLAUDE_SESSION_ID" \
   --agent-type "CLAUDE_CODE" \
   --changed-files "file1.kt,file2.kt" \
   --tag "tag here (REFACTORING|FEATURE|BUGFIX|TEST|DOCS)" \
   --alternatives "alternatives here" \
   --diff-summary "diffSummary here"
 ```
+
+> `$CLAUDE_SESSION_ID` is exported by the SessionStart hook into the session's environment file. Passing it explicitly is required so that captures are routed to the correct WorkSession even when multiple Claude Code sessions run in parallel against the same project. If the environment variable is empty (e.g., legacy install without the SessionStart hook), capture.js falls back to detecting the session from `.context-capture/.claude-prompts-*` by mtime — which is unreliable under parallel sessions.
 
 If capture fails, never interrupt the current workflow. Only output a warning and continue with the original work.
 
@@ -277,17 +356,33 @@ Therefore, when a subagent performs a git commit, include capture script executi
 When delegating work to a subagent, append the following instructions at the end of the prompt (cross-platform; the subagent's shell needs to support `$(...)` command substitution — Claude Code's default bash shell handles this on all OSes):
 
 ```
-After completing git commit, you MUST run the following script:
+After completing git commit, you MUST run the following script.
+
+⚠️ alternatives field writing rule: the default is an empty string ("").
+Fill it only when one or more of the following signals are explicitly present in your work conversation:
+- Explicit alternative comparison such as "Y instead of X", "X or Y", "I considered X"
+- Explicit review and rejection such as "Considered A but didn't because of X"
+- User's explicit refusal ("not A, use B")
+- Decision-branching discussion ("must choose between option 1 and option 2")
+
+If no signal exists, send an empty string (""). Filling alternatives by "plausibly imagining" them
+is hallucination and is strictly forbidden. A hallucinated line is more harmful than an empty string.
+
+Only when a signal exists, replace the `--alternatives ""` position in the script below with the
+actual alternatives content (one-line verbatim quote + Alternative block).
 
 node .claude/skills/context-capture/scripts/capture.js \
   --title "Work title (under 50 characters)" \
   --intent "Why this work was done (2-5 sentences)" \
   --commit-hash "$(git rev-parse HEAD)" \
+  --claude-session-id "$CLAUDE_SESSION_ID" \
   --agent-type "CLAUDE_CODE" \
   --changed-files "$(git diff --name-only HEAD~1 HEAD | paste -sd',' -)" \
   --tag "One of REFACTORING|FEATURE|BUGFIX|TEST|DOCS" \
-  --alternatives "Alternatives considered (empty string if none)" \
+  --alternatives "" \
   --diff-summary "Summary of key changes"
+
+`$CLAUDE_SESSION_ID` is exported by the SessionStart hook. The subagent inherits it from the parent shell, so it works in subagent contexts too.
 
 Continue working even if the script fails.
 ```

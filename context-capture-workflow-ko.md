@@ -4,7 +4,7 @@ AIFlare는 Claude Code의 **Hook**과 **Skill** 두 가지 메커니즘을 조�
 
 > **Hook 시스템 — 외부 스크립트 호출 패턴**
 >
-> 5개 command hook(`UserPromptSubmit`, `Stop`, `PostToolUse(Bash, if "Bash(git commit:*)")`, `PostToolUse(AskUserQuestion)`, `SessionEnd`)은 `settings.local.json` 안에서 각자 별도 Node.js 스크립트(`.claude/hooks/{hook}.js`)를 호출한다. 공용 동작은 `_common.js` 모듈에 모여 있고, install.js 가 모든 OS(macOS / Linux / Windows)에서 동일한 `.js` 훅 한 세트를 설치한다. 이하 각 Phase 의 동작 흐름 설명은 외부 hook 스크립트 내부에서 실행되는 흐름이다.
+> 6개 command hook(`SessionStart`, `UserPromptSubmit`, `Stop`, `PostToolUse(Bash, if "Bash(git commit:*)")`, `PostToolUse(AskUserQuestion)`, `SessionEnd`)은 `settings.local.json` 안에서 각자 별도 Node.js 스크립트(`.claude/hooks/{hook}.js`)를 호출한다. 공용 동작은 `_common.js` 모듈에 모여 있고, install.js 가 모든 OS(macOS / Linux / Windows)에서 동일한 `.js` 훅 한 세트를 설치한다. 이하 각 Phase 의 동작 흐름 설명은 외부 hook 스크립트 내부에서 실행되는 흐름이다.
 >
 > SessionEnd 는 cleanup 만 수행한다 (API 호출 없음).
 
@@ -18,6 +18,13 @@ AIFlare는 Claude Code의 **Hook**과 **Skill** 두 가지 메커니즘을 조�
     ▼
 ┌──────────────────────────────────────────────────────────┐
 │  Claude Code Session                                     │
+│                                                          │
+│  ⓪ SessionStart Hook (세션 시작 / resume 시)              │
+│     → $CLAUDE_ENV_FILE 에 CLAUDE_SESSION_ID=<session_id> │
+│       를 append → 이 세션의 모든 Bash 자식 프로세스          │
+│       (특히 capture.js) 가 현재 세션을 결정적으로 식별        │
+│       (병렬 Claude Code 세션 환경에서 캡처 라우팅 정확도의    │
+│       핵심)                                               │
 │                                                          │
 │  ① UserPromptSubmit Hook                                 │
 │     → 사용자 프롬프트를 JSONL 형식으로 로컬 파일에 누적 저장     │
@@ -345,9 +352,17 @@ capture.js 실행
     │
     ├─ aiflare.yml에서 api_key, endpoint 추출
     │
-    ├─ claudeSessionId fallback
-    │   --claude-session-id 생략 시:
-    │   가장 최근 .claude-prompts-* 파일에서 세션 ID 추출
+    ├─ claudeSessionId fallback (우선순위)
+    │   1. --claude-session-id 인자 (권장 — Skill 템플릿이
+    │      $CLAUDE_SESSION_ID 를 그대로 전달)
+    │   2. $CLAUDE_SESSION_ID 환경 변수 (SessionStart hook 이
+    │      $CLAUDE_ENV_FILE 에 export — 세션 프로세스 트리에
+    │      env var 가 바인딩되므로 병렬 세션에서도 신뢰 가능)
+    │   3. 가장 최근 .claude-prompts-* 파일을 mtime 으로 추출
+    │      (레거시 휴리스틱 — 단일 세션 설치에서만 정확. 병렬
+    │      세션에서는 다른 세션의 파일을 골라 잘못 라우팅될 수
+    │      있음. SessionStart hook 이전 설치의 backward
+    │      compatibility 목적)
     │
     ├─ conversationSnippet fallback (Delta 파일 자동 읽기)
     │   --conversation-snippet 생략 시:
@@ -563,10 +578,11 @@ endpoint: "localhost:8080"
 
 각 command hook 의 `command` 필드는 외부 Node.js 스크립트(`.claude/hooks/{이름}.js`) 한 줄 호출로 단순화되어 있다. 동작 로직은 모두 외부 스크립트가 책임진다.
 
-install.js 가 머지하는 hook 은 아래 5 개다.
+install.js 가 머지하는 hook 은 아래 6 개다.
 
 | Hook | 이벤트 | 외부 스크립트 | 역할 |
 |------|--------|---------------|------|
+| `SessionStart` | 세션 시작 / resume 시 | `session-start.js` | `$CLAUDE_ENV_FILE` 에 `export CLAUDE_SESSION_ID=<session_id>` 를 기록하여 이후 Bash 자식 프로세스(특히 `capture.js`)가 현재 세션을 결정적으로 식별할 수 있게 함 — 병렬 Claude Code 세션 환경에서 캡처 라우팅 정확도의 핵심 |
 | `UserPromptSubmit` | 프롬프트 입력 시 | `user-prompt-submit.js` | 사용자 입력을 JSONL 로 로컬 파일에 누적 저장 |
 | `Stop` | AI 응답 완료 시 | `stop.js` | AI 응답(`last_assistant_message`)을 JSONL 로 같은 파일에 누적 저장 |
 | `PostToolUse` | `Bash` matcher + `if: "Bash(git commit:*)"` | `post-tool-use-bash-git-commit.js` | 대화 JSONL 전송 + 줄 수 기반 delta 추출 + Skill 호출 강제 (hook 내부 정규식 이중 검증 포함) |
@@ -580,6 +596,7 @@ Node.js 단일 구현. install 시 `.claude/hooks/` 로 복사된다. `_common.j
 | 파일 | 역할 |
 |------|------|
 | `_common.js` | 공용 라이브러리 (camelCase). `readInput`, `getGitRoot`, `ensureContextDir`, `promptFilePath`, `offsetFilePath`, `deltaFilePath`, `pendingQuestionPath`, `hasAiflareConfig`, `readAiflareConfig`, `hasContextCaptureSkill`, `makeLogger` (info/warn/error emit 팩토리) — 총 11개 |
+| `session-start.js` | 세션 시작/resume 시 `$CLAUDE_ENV_FILE` 에 `export CLAUDE_SESSION_ID='<session_id>'` append → 이 세션의 모든 Bash 자식 프로세스가 동일 session id 상속 (capture.js 라우팅의 기반) |
 | `user-prompt-submit.js` | 사용자 prompt → JSONL 한 줄 append |
 | `stop.js` | `last_assistant_message` → JSONL 한 줄 append (`stop_hook_active=true` 면 skip) |
 | `post-tool-use-bash-git-commit.js` | git commit 직후. defense-in-depth 정규식 검증 → `uploadPromptFile` → `updateDelta` → Skill 호출 강제 메시지 출력 |

@@ -98,7 +98,15 @@ if (!API_KEY) {
   process.exit(0);
 }
 
-// --- claude-session-id fallback: extract from most recent prompt file ---
+// --- claude-session-id fallback ---
+// Priority: explicit --claude-session-id arg > $CLAUDE_SESSION_ID env (set by the
+// SessionStart hook via $CLAUDE_ENV_FILE; deterministic & session-isolated) >
+// most-recent-mtime of .claude-prompts-* (legacy heuristic; only correct for
+// single-session installs — buggy under parallel sessions because mtime can pick
+// up another session's file).
+if (!CLAUDE_SESSION_ID && process.env.CLAUDE_SESSION_ID) {
+  CLAUDE_SESSION_ID = process.env.CLAUDE_SESSION_ID;
+}
 if (!CLAUDE_SESSION_ID) {
   const ccDir = path.join(gitRoot, '.context-capture');
   if (fs.existsSync(ccDir)) {
@@ -155,6 +163,26 @@ const payload = {
   continuation: CONTINUATION,
 };
 if (CONVERSATION_SNIPPET) payload.conversationSnippet = CONVERSATION_SNIPPET;
+
+// --- alternatives hallucination heuristic ---
+// If alternatives is filled and conversationSnippet exists, match signal keywords;
+// emit a stderr warning when none match. Does not block (false negatives are inherent).
+// SIGNAL_KEYWORDS retains Korean entries by design so this works for Korean conversations.
+if (ALTERNATIVES && ALTERNATIVES.trim() && CONVERSATION_SNIPPET) {
+  // SIGNAL_KEYWORDS must be lowercase (Korean has no case; English keywords are already lowercase).
+  const SIGNAL_KEYWORDS = [
+    '대신', '대안', '고민', '검토', '비교', '옵션', 'vs', '말고',
+    'instead', 'considered', 'rejected', 'option', 'versus', 'alternative',
+  ];
+  const lower = CONVERSATION_SNIPPET.toLowerCase();
+  const hasSignal = SIGNAL_KEYWORDS.some((kw) => lower.includes(kw));
+  if (!hasSignal) {
+    process.stderr.write(
+      'WARN: alternatives field is filled but no alternative-comparison signal keyword ' +
+      'was found in the conversation snippet. Check for possible hallucination.\n'
+    );
+  }
+}
 
 // --- Error log helper ---
 const errLogDir = path.join(gitRoot, '.context-capture');
