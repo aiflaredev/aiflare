@@ -16,7 +16,7 @@ With AIFlare, you can:
 
 - **Commit messages aren't enough** — the *why* lives in the conversation, not the diff. AIFlare captures it before it's lost.
 - **Automatic on commit** — a Claude Code hook fires the capture skill the moment you `git commit`. No manual step required, even when a subagent commits.
-- **Slash-command reports** — `/summarize`, `/daily-digest`, `/weekly-digest`, `/pm-digest`, `/prompt-evaluate`, `/session-compare`.
+- **Slash-command reports** — `/summarize`, `/daily-digest`, `/weekly-digest` (each accepts a `dev` / `pm` audience), `/prompt-evaluate`, `/session-compare`, plus `/context-inject` and `/why` for pulling captured context back into a live session.
 - **MCP-native** — the bundled MCP server exposes session data through Claude Code (and any other MCP-aware client when supported).
 - **Two-step setup** — drop in `aiflare.yml` and run a single installer; skills, hooks, and MCP server are wired up for you.
 
@@ -84,14 +84,16 @@ your-repo/
 ├── .claude/
 │   ├── skills/
 │   │   ├── context-capture/      # automatic — runs after every git commit
+│   │   ├── context-inject/       # /context-inject
 │   │   ├── summarize/            # /summarize
-│   │   ├── daily-digest/         # /daily-digest
-│   │   ├── weekly-digest/        # /weekly-digest
-│   │   ├── pm-digest/            # /pm-digest
+│   │   ├── daily-digest/         # /daily-digest        (DEV / PM audience)
+│   │   ├── weekly-digest/        # /weekly-digest       (DEV / PM audience)
 │   │   ├── prompt-evaluate/      # /prompt-evaluate
-│   │   └── session-compare/      # /session-compare
-│   ├── hooks/                    # 5 Node.js hook scripts (.js only)
+│   │   ├── session-compare/      # /session-compare
+│   │   └── why/                  # /why  — explain why a line was written
+│   ├── hooks/                    # 6 Node.js hooks + 1 shared helper (.js only)
 │   │   ├── _common.js
+│   │   ├── session-start.js
 │   │   ├── post-tool-use-bash-git-commit.js
 │   │   ├── post-tool-use-ask-user-question.js
 │   │   ├── user-prompt-submit.js
@@ -112,7 +114,7 @@ That is the **complete** list of paths AIFlare creates or modifies.
 
 The installer does **not** modify your application code, your Git config, your CI configuration, your branch state, or any file outside the paths listed above. It does not push, pull, commit, or open network connections to anything other than:
 
-- `github.com` — to clone the public skill/hook repository (`https://github.com/kwo2002/context-bridge`)
+- `github.com` — to clone the public skill/hook repository (`https://github.com/aiflaredev/aiflare`)
 - `registry.npmjs.org` — to install the MCP server's runtime dependencies
 
 Capture data only leaves your machine **after** install, when you commit (see [Security & Privacy](#security--privacy)).
@@ -139,6 +141,11 @@ When you (or a subagent) run `git commit`, the `PostToolUse` hook matching `Bash
 
 You can later query that data through slash commands or the MCP tools.
 
+For a detailed walkthrough of every phase (hooks, delta extraction, group resolution, push-state transition, etc.), see the capture workflow deep dive:
+
+- [English](./context-capture-workflow-en.md)
+- [한국어](./context-capture-workflow-ko.md)
+
 ## Skills
 
 AIFlare installs a set of Claude Code skills as slash commands. All reports are written in the language of your recent commit messages (English, Korean, etc.) — detected automatically from `git log --oneline -3`.
@@ -146,12 +153,13 @@ AIFlare installs a set of Claude Code skills as slash commands. All reports are 
 | Skill              | Slash Command         | Purpose                                                                                              |
 | ------------------ | --------------------- | ---------------------------------------------------------------------------------------------------- |
 | `context-capture`  | _(automatic)_         | Captures intent, alternatives, and diff summary after each `git commit`. Runs automatically.        |
+| `context-inject`   | `/context-inject`     | Injects a previous session's saved summary back into the current session — paste a sessionId from the AIFlare dashboard |
 | `summarize`        | `/summarize`          | Summarizes a session and emits a structured **continuation directive** for the next agent to pick up |
-| `daily-digest`     | `/daily-digest`       | Daily report: commits, sessions, tag distribution, hottest files, key decisions                      |
-| `weekly-digest`    | `/weekly-digest`      | Weekly report centered on **key decisions** with rejected alternatives                               |
-| `pm-digest`        | `/pm-digest`          | Same week as `weekly-digest`, re-narrated in non-technical, business-impact language for PMs         |
+| `daily-digest`     | `/daily-digest`       | Daily report. First positional arg `dev` / `pm` selects audience (default `dev`); PM mode re-narrates in business-impact language |
+| `weekly-digest`    | `/weekly-digest`      | Weekly report centered on **key decisions** with rejected alternatives. Same `dev` / `pm` audience switch as `daily-digest` |
 | `prompt-evaluate`  | `/prompt-evaluate`    | Coach-style review of the prompts you sent in a session, with paste-ready next-session templates     |
 | `session-compare`  | `/session-compare`    | Side-by-side comparison of two sessions (overlapping files, direction change, tag shift)             |
+| `why`              | `/why`                | Explains why a specific line (or file) was written the way it is — runs `git log -L` locally, then pulls each touching commit's captured intent / alternatives / line-around diff / conversation |
 
 ### Slash Command Reference
 
@@ -168,39 +176,61 @@ AIFlare installs a set of Claude Code skills as slash commands. All reports are 
 /summarize 2026-04-26-abc123de-f456-7890-abcd-ef1234567890
 ```
 
-#### `/daily-digest [date]`
+#### `/daily-digest [dev|pm] [date]`
 
-| Parameter | Required | Description                                                                |
-| --------- | -------- | -------------------------------------------------------------------------- |
-| `date`    | optional | Date in `YYYY-MM-DD` format. Omit to use today's date.                     |
+| Parameter  | Required | Description                                                                                          |
+| ---------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| `audience` | optional | `dev` (default) or `pm`. PM mode re-narrates the same data in non-technical, business-impact language |
+| `date`     | optional | Date in `YYYY-MM-DD` format. Omit to use today's date.                                               |
 
 **Examples:**
 
 ```
 /daily-digest
 /daily-digest 2026-04-25
+/daily-digest pm
+/daily-digest pm 2026-04-25
 ```
 
-#### `/weekly-digest [week]`
+#### `/weekly-digest [dev|pm] [week]`
 
-| Parameter | Required | Description                                                                  |
-| --------- | -------- | ---------------------------------------------------------------------------- |
-| `week`    | optional | ISO 8601 week (e.g., `2026-W17`). Omit to use the current week.              |
+| Parameter  | Required | Description                                                                                          |
+| ---------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| `audience` | optional | `dev` (default) or `pm`. Same audience switch as `/daily-digest`.                                    |
+| `week`     | optional | ISO 8601 week (e.g., `2026-W17`). Omit to use the current week.                                      |
 
 **Examples:**
 
 ```
 /weekly-digest
 /weekly-digest 2026-W17
+/weekly-digest pm
+/weekly-digest pm 2026-W17
 ```
 
-#### `/pm-digest [week]`
+#### `/context-inject <session-id>`
 
-| Parameter | Required | Description                                                                  |
-| --------- | -------- | ---------------------------------------------------------------------------- |
-| `week`    | optional | ISO 8601 week (e.g., `2026-W17`). Omit to use the current week.              |
+| Parameter    | Required | Description                                                                                          |
+| ------------ | -------- | ---------------------------------------------------------------------------------------------------- |
+| `session-id` | yes      | A past session's ID, copied from the AIFlare dashboard. NOT the current session.                     |
 
-Uses the same data as `/weekly-digest` but re-narrates it in business-impact language. The week argument has identical semantics.
+Pulls the most recently saved session summary report for that session and injects it into the current agent's context, so you can pick up the prior intent and rejected alternatives without re-explaining.
+
+#### `/why <file> [line]`
+
+| Parameter | Required | Description                                                                                          |
+| --------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| `file`    | yes      | Path to the file under investigation.                                                                |
+| `line`    | optional | Specific line number. With `line`, the skill runs `git log -L line,line:file` (in-file refactors tracked; renames not followed). Without `line`, every commit that touched the file is collected. |
+
+For each touching commit, the skill fetches the captured intent, alternatives, line-around diff, and conversation from AIFlare and presents them as a chronological timeline. Use when debugging code an AI agent wrote, before guessing at the original design.
+
+**Examples:**
+
+```
+/why src/auth/login.ts
+/why src/auth/login.ts 42
+```
 
 #### `/prompt-evaluate [session-id]`
 
@@ -272,22 +302,20 @@ Each capture stores the following structured fields, built from the active conve
 
 The bundled `@aiflare/mcp-server` exposes the following tools. AIFlare currently wires this server up for **Claude Code only** — other MCP-aware clients are not yet officially supported.
 
-| Tool                              | Description                                               |
-| --------------------------------- | --------------------------------------------------------- |
-| `get_session_summary`             | Fetch raw data for a session                              |
-| `get_session_prompts`             | Fetch JSONL of user/assistant turns for prompt evaluation |
-| `get_daily_digest`                | Fetch raw data for a day's commits and sessions           |
-| `get_weekly_digest`               | Fetch raw data for a week                                 |
-| `get_pm_digest`                   | Fetch the week's data filtered for PM-oriented framing    |
-| `get_session_compare`             | Fetch comparison data for two sessions                    |
-| `get_recent_captures`             | Fetch recent captures across the project                  |
-| `get_file_history`                | Fetch the capture history for a single file               |
-| `save_session_report`             | Save a session summary report                             |
-| `save_daily_digest_report`        | Save a daily digest report                                |
-| `save_weekly_digest_report`       | Save a weekly digest report                               |
-| `save_pm_digest_report`           | Save a PM digest report                                   |
-| `save_prompt_evaluation_report`   | Save a prompt evaluation report                           |
-| `save_session_compare_report`     | Save a session comparison report                          |
+| Tool                              | Description                                                                                  |
+| --------------------------------- | -------------------------------------------------------------------------------------------- |
+| `get_session_summary`             | Fetch raw data for a session                                                                 |
+| `get_saved_session_report`        | Fetch a previously saved session summary report — backs `/context-inject`                    |
+| `get_session_prompts`             | Fetch JSONL of user/assistant turns for prompt evaluation                                    |
+| `get_daily_digest`                | Fetch raw data for a day's commits and sessions (audience selected by caller)                |
+| `get_weekly_digest`               | Fetch raw data for a week (audience selected by caller)                                      |
+| `get_session_compare`             | Fetch comparison data for two sessions                                                       |
+| `why`                             | For a file (and optional line), run `git log -L` locally, then fetch each touching commit's captured intent / alternatives / line-around diff / conversation as a timeline |
+| `save_session_report`             | Save a session summary report                                                                |
+| `save_daily_digest_report`        | Save a daily digest report (DEV or PM)                                                       |
+| `save_weekly_digest_report`       | Save a weekly digest report (DEV or PM)                                                      |
+| `save_prompt_evaluation_report`   | Save a prompt evaluation report                                                              |
+| `save_session_compare_report`     | Save a session comparison report                                                             |
 
 The installer registers the server in your project's `.mcp.json`:
 
@@ -304,10 +332,11 @@ The installer registers the server in your project's `.mcp.json`:
 
 ## Hooks
 
-The installer registers five Claude Code hooks via `.claude/settings.local.json`:
+The installer registers six Claude Code hooks via `.claude/settings.local.json`:
 
 | Hook                                              | Trigger                                       | What it does                                                            |
 | ------------------------------------------------- | --------------------------------------------- | ----------------------------------------------------------------------- |
+| `SessionStart`                                    | Claude Code session starts                    | Exports `CLAUDE_SESSION_ID` into the session environment so captures from parallel sessions in the same repo are routed correctly |
 | `PostToolUse` ⟶ `Bash` (matches `*git commit*`)   | After a Bash tool call running `git commit`   | Fires the context-capture flow                                          |
 | `PostToolUse` ⟶ `AskUserQuestion`                 | After every `AskUserQuestion`                 | Marks the next capture as a continuation of an interrupted flow         |
 | `UserPromptSubmit`                                | Every user prompt                             | Persists the prompt for `/prompt-evaluate`                              |
@@ -379,12 +408,13 @@ To completely remove AIFlare from your project, follow the steps below. None of 
 ```bash
 # AIFlare skills (only the ones AIFlare installs — keep any unrelated skills you have)
 rm -rf .claude/skills/context-capture
+rm -rf .claude/skills/context-inject
 rm -rf .claude/skills/summarize
 rm -rf .claude/skills/daily-digest
 rm -rf .claude/skills/weekly-digest
-rm -rf .claude/skills/pm-digest
 rm -rf .claude/skills/prompt-evaluate
 rm -rf .claude/skills/session-compare
+rm -rf .claude/skills/why
 
 # Hook scripts and MCP server
 rm -rf .claude/hooks
@@ -406,6 +436,7 @@ rm .mcp.json   # only if you have no other MCP servers
 
 Open `.claude/settings.local.json` and remove every `hooks` entry whose `command` references `.claude/hooks/...` (the AIFlare hook scripts). The relevant entries are:
 
+- `SessionStart`
 - `PostToolUse` ⟶ `Bash` (matches `*git commit*`)
 - `PostToolUse` ⟶ `AskUserQuestion`
 - `UserPromptSubmit`

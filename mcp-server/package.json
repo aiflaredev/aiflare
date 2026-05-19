@@ -2,7 +2,6 @@
   "name": "@aiflare/mcp-server",
   "version": "1.0.0",
   "description": "AIFlare MCP Server for Claude Code",
-  "license": "MIT",
   "type": "module",
   "bin": {
     "aiflare-mcp": "./dist/index.js"
